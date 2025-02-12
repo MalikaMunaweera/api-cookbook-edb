@@ -55,7 +55,6 @@ pt_all_priorities = [
     "p3 - low",
 ]
 
-
 def populate_priorities_csv(priorities_csv_file, priority_custom_field_id):
     """
     Writes a CSV file mapping Pivotal Tracker's 5 story priorities to appropriate
@@ -324,6 +323,7 @@ def populate_users_csv(users_csv_file, pt_csv_file):
     user_matching_map = _build_user_matching_map(sc_users)
     try:
         with open(users_csv_file, "x") as f:
+            print_with_timestamp("Populating Users")
             pt_all_users = sorted(extract_pt_users(pt_csv_file))
             unmapped_pt_users = []
             writer = csv.DictWriter(
@@ -423,7 +423,7 @@ def extract_pt_users(pt_csv_file):
     Given the Pivotal export CSV, return a unique set of all users found in all rows.
     """
     pt_users = set()
-    with open(pt_csv_file) as csvfile:
+    with open(pt_csv_file, 'r', encoding='utf-8') as csvfile:
         reader = csv.reader(csvfile)
         header = [col.lower() for col in next(reader)]
         for row in reader:
@@ -545,6 +545,41 @@ have accounts in your Shortcut workspace.
     sys.exit(1)
 
 
+def remove_emojis(text):
+    if text is None:
+        return text
+    emoji_pattern = re.compile(
+        u"["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
+        u"\U0001FA00-\U0001FA6F"  # extended-A
+        u"\U0001FA70-\U0001FAFF"  # extended-B
+        u"\U00002600-\U000026FF"  # miscellaneous symbols
+        u"\U00002700-\U000027BF"  # dingbats
+        u"\U0001F100-\U0001F1FF"  # enclosed alphanumeric supplement
+        u"\U0001F200-\U0001F2FF"  # enclosed ideographic supplement
+        u"\U00002300-\U000023FF"  # miscellaneous technical
+        u"\U00002B00-\U00002BFF"  # misc symbols and arrows
+        u"]+", flags=re.UNICODE)
+    return emoji_pattern.sub(r'', str(text))
+
+def read_csv_and_remove_emojis(input_file):
+    cleaned_data = []
+
+    with open(input_file, 'r', encoding='utf-8') as csvfile:
+        reader = csv.reader(csvfile)
+        headers = next(reader)  # Read the header row
+
+        for row in reader:
+            # Remove emojis from each cell in the row
+            cleaned_row = [remove_emojis(cell) for cell in row]
+            cleaned_data.append(cleaned_row)
+
+    return headers, cleaned_data
+
+
 def main(argv):
     """
     Script entry-point for initializing an import of Pivotal data into Shortcut.
@@ -570,6 +605,17 @@ def main(argv):
     # Configuration consists of the environment variable SHORTCUT_API_TOKEN and all values
     # found in the local config.json file (which is written by this script if absent).
     cfg = load_config()
+
+    # Clean the pivotal_export.csv file to remove emojis
+    input_file = cfg["pt_csv_file"]
+    headers, cleaned_data = read_csv_and_remove_emojis(input_file)
+
+    # write the cleaned data to the same CSV file:
+    output_file = cfg["pt_csv_file"]
+    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(headers)
+        writer.writerows(cleaned_data)
 
     # Populate local data/priorities.csv, data/states.csv, and data/users.csv files,
     # automatically where possible, and print problems to the console where mappings

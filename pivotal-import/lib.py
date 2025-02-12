@@ -52,6 +52,9 @@ def print_rate_limiting_explanation():
        It may pause for up to {max_limiter_delay_seconds} seconds during processing to avoid request throttling."""
     )
 
+def print_with_timestamp(*args, **kwargs):
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{current_time}]", *args, **kwargs)
 
 # API Helpers
 sc_token = os.getenv("SHORTCUT_API_TOKEN")

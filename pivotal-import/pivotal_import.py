@@ -34,7 +34,6 @@ PIVOTAL_RELEASE_TYPE_LABEL = "pivotal-release"
 """The label indicating a story had reviews in Pivotal."""
 PIVOTAL_HAD_REVIEW_LABEL = "pivotal-had-review"
 
-
 def sc_creator(items):
     """Create Shortcut entities utilizing bulk APIs whenever possible.
 
@@ -75,10 +74,12 @@ def sc_creator(items):
             raise RuntimeError("Unknown entity type {}".format(item["type"]))
 
         if len(batch_stories) >= BATCH_SIZE:
+            print_with_timestamp("Creating Stories in Batches of {}".format(BATCH_SIZE))
             create_stories(batch_stories)
             batch_stories.clear()
 
     if batch_stories:
+        print_with_timestamp("Creating Stories in Batches of {}".format(BATCH_SIZE))
         create_stories(batch_stories)
 
     return items
@@ -408,7 +409,7 @@ def get_mock_emitter():
             created_entity["entity_type"] = item["type"]
             created_entity["app_url"] = f"https://example.com/entity/{entity_id}"
             item["imported_entity"] = created_entity
-            print(
+            print_with_timestamp(
                 'Creating {} {} "{}"'.format(
                     item["type"], entity_id, item["entity"]["name"]
                 )
@@ -523,13 +524,13 @@ class EntityCollector:
         for label in self.labels:
             if PIVOTAL_TO_SHORTCUT_RUN_LABEL == label["entity"]["name"]:
                 label_url = label["imported_entity"]["app_url"]
-                print(
+                print_with_timestamp(
                     f"Import Started\n\n==> Click here to monitor import progress: {label_url}"
                 )
 
         # create all the epics and find their associated Shortcut epic ids
         self.epics = self.emitter(self.epics)
-        print("Finished creating {} epics".format(len(self.epics)))
+        print_with_timestamp("Finished creating {} epics".format(len(self.epics)))
         assign_stories_to_epics(self.stories, self.epics)
 
         # create all iterations and find their associated Shortcut iteration ids
@@ -549,7 +550,7 @@ class EntityCollector:
                 }
             )
         self.iterations = self.emitter(iteration_entities)
-        print("Finished creating {} iterations".format(len(self.iterations)))
+        print_with_timestamp("Finished creating {} iterations".format(len(self.iterations)))
         assign_stories_to_iterations(self.stories, self.iterations)
 
         # upload files attached to stories so they can be associated during Story creation
@@ -557,6 +558,7 @@ class EntityCollector:
             pt_id = story["entity"]["external_id"]
             pt_files_dir = f"data/{pt_id}"
             if os.path.isdir(pt_files_dir):
+                print_with_timestamp("Uploading files for {}...".format(pt_id))
                 file_entities = sc_upload_files(
                     [
                         os.path.join(dirpath, f)
@@ -573,7 +575,7 @@ class EntityCollector:
 
         # create all the stories
         self.stories = self.emitter(self.stories)
-        print("Finished creating {} stories".format(len(self.stories)))
+        print_with_timestamp("Finished creating {} stories".format(len(self.stories)))
 
         # Aggregate all the created stories, epics, iterations, and labels into a list of maps
         created_entities = []
@@ -586,12 +588,11 @@ class EntityCollector:
 
         return created_entities
 
-
 def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
     stats = Counter()
     stats.update(entity_collector.collect(build_run_label_entity()))
 
-    with open(pt_csv_file) as csvfile:
+    with open(pt_csv_file, 'r', encoding='utf-8') as csvfile:
         reader = csv.reader(csvfile)
         header = [col.lower() for col in next(reader)]
         for row in reader:
@@ -600,7 +601,7 @@ def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
             logger.debug("Emitting Entity: %s", entity)
             stats.update(entity_collector.collect(entity))
 
-    print("Summary of data to be imported")
+    print_with_timestamp("Summary of data to be imported")
     print_stats(stats)
 
 
@@ -611,6 +612,7 @@ def write_created_entities_csv(created_entities):
         )
         writer.writeheader()
         for entity in created_entities:
+            print_with_timestamp("Writing Entity {}".format(entity["name"]))
             writer.writerow(
                 {
                     "id": entity["id"],
