@@ -6,6 +6,7 @@ import argparse
 import csv
 import re
 import sys
+import sqlite3
 from datetime import datetime
 from collections import Counter
 
@@ -553,25 +554,71 @@ class EntityCollector:
         print_with_timestamp("Finished creating {} iterations".format(len(self.iterations)))
         assign_stories_to_iterations(self.stories, self.iterations)
 
-        # upload files attached to stories so they can be associated during Story creation
+        # Upload files attached to comments in stories
         for story in self.stories:
             pt_id = story["entity"]["external_id"]
             pt_files_dir = f"data/{pt_id}"
             if os.path.isdir(pt_files_dir):
-                print_with_timestamp("Uploading files for {}...".format(pt_id))
-                file_entities = sc_upload_files(
-                    [
-                        os.path.join(dirpath, f)
-                        for (dirpath, _, filenames) in os.walk(pt_files_dir)
-                        for f in filenames
-                    ]
-                )
-                self.files += [
-                    {"imported_entity": file_entity} for file_entity in file_entities
-                ]
-                story["entity"]["file_ids"] = [
-                    file_entity["id"] for file_entity in file_entities
-                ]
+                print_with_timestamp(f"Processing files for story {pt_id}...")
+
+                # Get all files in the story directory
+                all_story_files = {
+                    f: os.path.join(dirpath, f)
+                    for (dirpath, _, filenames) in os.walk(pt_files_dir)
+                    for f in filenames
+                }
+
+                # Iterate through comments in the story
+                for i, comment in enumerate(story["entity"].get("comments", [])):
+                    comment_attachments = comment.pop("attachments", [])  # Remove and get attachments
+
+                    if comment_attachments:
+                        print_with_timestamp(f"Uploading files for comment {i} in story {pt_id}...")
+
+                        # Find the full paths of files mentioned in the comment
+                        comment_file_paths = [
+                            all_story_files[attachment['filename']]
+                            for attachment in comment_attachments
+                            if attachment['filename'] in all_story_files
+                        ]
+
+                        if comment_file_paths:
+                            file_entities = sc_upload_files(comment_file_paths)
+                            self.files += [
+                                {"imported_entity": file_entity} for file_entity in file_entities
+                            ]
+
+                            # Create file attachment strings and append to comment text
+                            file_attachment_strings = []
+                            for file_entity, attachment in zip(file_entities, comment_attachments):
+                                filename = file_entity["filename"]
+                                url = file_entity["url"]
+                                content_type = attachment['content_type']
+
+                                # Check if the content type is an image
+                                is_image = content_type.startswith('image/')
+
+                                # Create attachment string based on content type
+                                attachment_string = f"{'!' if is_image else ''}[{filename}]({url})"
+                                file_attachment_strings.append(attachment_string)
+
+                            # Append file attachment strings to comment text
+                            if file_attachment_strings:
+                                comment["text"] += "\n\n" + "\n".join(file_attachment_strings) + "\n"
+
+                    # Update the comment in the story entity
+                    story["entity"]["comments"][i] = comment
+
+
+        def clean_story(story):
+            if "comments" in story["entity"]:
+                for comment in story["entity"]["comments"]:
+                    comment.pop("filenames", None)
+            return story
+
+        # Clean all stories
+        self.stories = [clean_story(story) for story in self.stories]
+
 
         # create all the stories
         self.stories = self.emitter(self.stories)
@@ -588,6 +635,77 @@ class EntityCollector:
 
         return created_entities
 
+db_path = ""
+
+
+def add_attached_files_in_comments(row_info):
+    # Establish connection to the SQLite database
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    if "external_id" in row_info and "comments" in row_info:
+        external_id = row_info["external_id"]
+
+        # Query the database for the number of comments
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM comment
+            WHERE story_id = ?
+        """, (external_id,))
+
+        db_comment_count = cursor.fetchone()[0]
+        csv_comment_count = len(row_info["comments"])
+
+        # Print message based on count comparison
+        if db_comment_count != csv_comment_count:
+            print_with_timestamp(f"Comment count mismatch for story_id {external_id}: "
+                  f"DB count = {db_comment_count}, CSV count = {csv_comment_count}")
+        else:
+            print_with_timestamp(f"Comment count matches for story_id {external_id}")
+
+            # If counts match, fetch detailed comment information
+            cursor.execute("""
+                SELECT C.id, C.text, C.created_at, FA.filename, FA.content_type
+                FROM comment AS C
+                LEFT JOIN file_attachment AS FA
+                ON C.id = FA.comment_id
+                WHERE C.story_id = ?
+                ORDER BY C.created_at, FA.filename
+            """, (external_id,))
+
+            db_comments = cursor.fetchall()
+
+            # Process and store the detailed comment information
+            processed_comments = {}
+            for comment in db_comments:
+                comment_id = comment[0]
+                if comment_id not in processed_comments:
+                    processed_comments[comment_id] = {
+                        'id': comment_id,
+                        'text': comment[1] if comment[1] is not None else "",  # Handle None case
+                        'created_at': comment[2],
+                        'attachments': []
+                    }
+                if comment[3]:  # If there's a filename
+                    processed_comments[comment_id]['attachments'].append({
+                        'filename': comment[3],
+                        'content_type': comment[4]
+                    })
+
+            row_info['db_comments'] = list(processed_comments.values())
+
+            # Update the original comments in row_info with the processed ones
+            for i, comment in enumerate(row_info['comments']):
+                if i < len(row_info['db_comments']):
+                    comment['text'] = row_info['db_comments'][i]['text']
+                    comment['attachments'] = row_info['db_comments'][i]['attachments']
+
+    # Close the database connection
+    conn.close()
+
+    return row_info
+
+
 def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
     stats = Counter()
     stats.update(entity_collector.collect(build_run_label_entity()))
@@ -597,6 +715,7 @@ def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
         header = [col.lower() for col in next(reader)]
         for row in reader:
             row_info = parse_row(row, header)
+            row_info = add_attached_files_in_comments(row_info)
             entity = build_entity(ctx, row_info)
             logger.debug("Emitting Entity: %s", entity)
             stats.update(entity_collector.collect(entity))

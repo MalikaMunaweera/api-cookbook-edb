@@ -94,6 +94,10 @@ def sc_post(path, data={}):
     url = api_url_base + path
     logger.debug("POST url=%s params=%s headers=%s" % (url, data, headers))
     resp = requests.post(url, headers=headers, json=data)
+
+    if resp.status_code != 201:
+        print_with_timestamp(f"ERROR in POST API! Status Code: {resp.status_code}, Text: {resp.text}")
+
     logger.debug(f"POST response: {resp.status_code} {resp.text}")
     resp.raise_for_status()
     return resp.json()
