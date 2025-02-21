@@ -19,7 +19,7 @@ import csv
 import difflib
 import logging
 import sys
-
+import emoji
 
 from lib import *
 
@@ -548,22 +548,54 @@ have accounts in your Shortcut workspace.
 def remove_emojis(text):
     if text is None:
         return text
-    emoji_pattern = re.compile(
+
+    # First, use the emoji library to remove emojis
+    text = emoji.replace_emoji(text, replace='')
+
+    # Pattern to match special symbols, math symbols, arrows, CJK symbols, and similar characters
+    pattern = re.compile(
         u"["
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
-        u"\U0001FA00-\U0001FA6F"  # extended-A
-        u"\U0001FA70-\U0001FAFF"  # extended-B
-        u"\U00002600-\U000026FF"  # miscellaneous symbols
-        u"\U00002700-\U000027BF"  # dingbats
-        u"\U0001F100-\U0001F1FF"  # enclosed alphanumeric supplement
-        u"\U0001F200-\U0001F2FF"  # enclosed ideographic supplement
-        u"\U00002300-\U000023FF"  # miscellaneous technical
-        u"\U00002B00-\U00002BFF"  # misc symbols and arrows
-        u"]+", flags=re.UNICODE)
-    return emoji_pattern.sub(r'', str(text))
+        u"\u2600-\u26FF"          # miscellaneous symbols
+        u"\u2700-\u27BF"          # dingbats
+        u"\u2300-\u23FF"          # technical symbols
+        u"\u2100-\u214F"          # letter-like symbols
+        u"\u2190-\u21FF"          # arrows
+        u"\u2200-\u22FF"          # mathematical operators
+        u"\u2500-\u257F"          # box drawing
+        u"\u2580-\u259F"          # block elements
+        u"\u25A0-\u25FF"          # geometric shapes
+        u"\u2B00-\u2BFF"          # miscellaneous symbols and arrows
+        u"\u2E00-\u2E7F"          # supplemental punctuation
+        u"\u2070-\u209F"          # superscripts and subscripts
+        u"\u20A0-\u20CF"          # currency symbols
+        u"\u20D0-\u20FF"          # combining diacritical marks for symbols
+        u"\u2150-\u218F"          # number forms
+        u"\u2C60-\u2C7F"          # latin extended-c
+        u"\uFE00-\uFE0F"          # variation selectors
+        u"\uFFF0-\uFFFF"          # specials
+        u"\u3000-\u303F"          # CJK symbols and punctuation
+        u"\u3200-\u32FF"          # Enclosed CJK Letters and Months
+        u"\u3300-\u33FF"          # CJK Compatibility
+        u"\u3040-\u309F"          # Hiragana
+        u"\u30A0-\u30FF"          # Katakana
+        u"\u3100-\u312F"          # Bopomofo
+        u"\u3130-\u318F"          # Hangul Compatibility Jamo
+        u"\u31F0-\u31FF"          # Katakana Phonetic Extensions
+        u"\u3400-\u4DBF"          # CJK Unified Ideographs Extension A
+        u"\u4E00-\u9FFF"          # CJK Unified Ideographs
+        u"\uF900-\uFAFF"          # CJK Compatibility Ideographs
+        u"]",
+        flags=re.UNICODE
+    )
+
+    # Remove the matched characters
+    cleaned_text = pattern.sub('', text)
+
+    # Remove any resulting double spaces
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
+    return cleaned_text
+
 
 def read_csv_and_remove_emojis(input_file):
     cleaned_data = []
@@ -623,7 +655,7 @@ def main(argv):
     populate_priorities_csv(cfg["priorities_csv_file"], cfg["priority_custom_field_id"])
     populate_states_csv(cfg["states_csv_file"], cfg["workflow_id"])
     populate_users_csv(cfg["users_csv_file"], cfg["pt_csv_file"])
-    print(
+    print_with_timestamp(
         "[Success] Pivotal Tracker export and local configuration have been validated."
     )
     return 0

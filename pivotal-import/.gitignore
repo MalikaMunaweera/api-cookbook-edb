@@ -1,5 +1,7 @@
 data/
 config.json
 
+*.db
+
 # Python
 .coverage

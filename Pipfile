@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 requests = "~=2.32.2"
 pyrate-limiter = "~=3.6.0"
+emoji = "*"
 
 [dev-packages]
 black = "*"
