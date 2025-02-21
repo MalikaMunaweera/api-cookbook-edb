@@ -613,7 +613,7 @@ class EntityCollector:
         def clean_story(story):
             if "comments" in story["entity"]:
                 for comment in story["entity"]["comments"]:
-                    comment.pop("filenames", None)
+                    comment.pop("attachments", None)
             return story
 
         # Clean all stories
@@ -635,12 +635,10 @@ class EntityCollector:
 
         return created_entities
 
-db_path = ""
-
 
 def add_attached_files_in_comments(row_info):
     # Establish connection to the SQLite database
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect("pivotal_dump.db")
     cursor = conn.cursor()
 
     if "external_id" in row_info and "comments" in row_info:
