@@ -20,6 +20,7 @@ import difflib
 import logging
 import sys
 import emoji
+import sqlite3
 
 from lib import *
 
@@ -612,6 +613,59 @@ def read_csv_and_remove_emojis(input_file):
     return headers, cleaned_data
 
 
+def verify_comments_count_in_stories(pt_csv_file):
+    # Establish connection to the SQLite database
+    conn = sqlite3.connect("pivotal_dump.db")
+    cursor = conn.cursor()
+
+    mismatches = []
+
+    with open(pt_csv_file, 'r', encoding='utf-8') as csvfile:
+        reader = csv.reader(csvfile)
+        header = [col.lower() for col in next(reader)]
+        for row in reader:
+            row_info = parse_row(row, header)
+
+            if "external_id" in row_info and "comments" in row_info:
+                external_id = row_info["external_id"]
+
+                # Query the database for the number of comments
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM comment
+                    WHERE story_id = ?
+                """, (external_id,))
+
+                db_comment_count = cursor.fetchone()[0]
+                csv_comment_count = len(row_info["comments"])
+
+                # Check for mismatch and add to list if found
+                if db_comment_count != csv_comment_count:
+                    mismatches.append({
+                        'story_id': external_id,
+                        'db_count': db_comment_count,
+                        'csv_count': csv_comment_count
+                    })
+
+    # Close the database connection
+    conn.close()
+
+    # Print all mismatches and exit if any are found
+    if mismatches:
+        print_with_timestamp("Comment count mismatches found:")
+        for mismatch in mismatches:
+            print_with_timestamp(f"Story ID {mismatch['story_id']}: "
+                                 f"DB count = {mismatch['db_count']}, "
+                                 f"CSV count = {mismatch['csv_count']}")
+
+        printerr("Comment count mismatch for the above stories.")
+        printerr("Make sure comment counts match to avoid file attachments "
+                 "getting mapped to wrong comments once migrated to Shortcut.")
+        sys.exit(1)
+    else:
+        print_with_timestamp("All comment counts match between the database and CSV.")
+
+
 def main(argv):
     """
     Script entry-point for initializing an import of Pivotal data into Shortcut.
@@ -639,12 +693,11 @@ def main(argv):
     cfg = load_config()
 
     # Clean the pivotal_export.csv file to remove emojis
-    input_file = cfg["pt_csv_file"]
-    headers, cleaned_data = read_csv_and_remove_emojis(input_file)
+    pt_csv_file = cfg["pt_csv_file"]
+    headers, cleaned_data = read_csv_and_remove_emojis(pt_csv_file)
 
     # write the cleaned data to the same CSV file:
-    output_file = cfg["pt_csv_file"]
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+    with open(pt_csv_file, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(headers)
         writer.writerows(cleaned_data)
@@ -654,7 +707,10 @@ def main(argv):
     # are not 100% complete.
     populate_priorities_csv(cfg["priorities_csv_file"], cfg["priority_custom_field_id"])
     populate_states_csv(cfg["states_csv_file"], cfg["workflow_id"])
-    populate_users_csv(cfg["users_csv_file"], cfg["pt_csv_file"])
+    populate_users_csv(cfg["users_csv_file"], pt_csv_file)
+
+    verify_comments_count_in_stories(pt_csv_file)
+
     print_with_timestamp(
         "[Success] Pivotal Tracker export and local configuration have been validated."
     )

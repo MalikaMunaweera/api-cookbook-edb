@@ -477,6 +477,34 @@ def fetch_members():
 #
 
 
+def parse_date(d: str):
+    """Parse the string as a date, then return as a string in ISO 8601 format."""
+    dt = datetime.strptime(d, "%b %d, %Y").date()
+    return dt.strftime("%Y-%m-%d")
+
+
+def parse_date_time(d: str):
+    """Parse the string as a datetime, then return as a string in ISO 8601 format."""
+    return datetime.strptime(d, "%b %d, %Y").isoformat()
+
+
+def parse_labels(labels: str):
+    return [{"name": label} for label in re.split(r"\s*,\s*", labels)]
+
+
+def parse_priority(priority):
+    lowered = priority.lower()
+    if lowered == "none":
+        return None
+    else:
+        return lowered
+
+
+def url_to_external_links(url):
+    return [url]
+
+
+
 def parse_comment(s):
     """Parse comment text into a dict with entries:
     - text (comment text, excluding final authorship content)
@@ -498,15 +526,63 @@ def parse_comment(s):
         return {"text": s}
 
 
-def parse_date(d: str):
-    """Parse the string as a date, then return as a string in ISO 8601 format."""
-    dt = datetime.strptime(d, "%b %d, %Y").date()
-    return dt.strftime("%Y-%m-%d")
+col_map = {
+    "accepted at": ("accepted_at", parse_date_time),
+    "created at": ("created_at", parse_date_time),
+    "current state": "pt_state",
+    "deadline": ("deadline", parse_date_time),
+    "description": "description",
+    "estimate": ("estimate", int),
+    "id": "external_id",
+    "iteration": "pt_iteration_id",
+    "iteration end": ("pt_iteration_end_date", parse_date),
+    "iteration start": ("pt_iteration_start_date", parse_date),
+    "labels": ("labels", parse_labels),
+    "priority": ("priority", parse_priority),
+    "requested by": "requester",
+    "title": "name",
+    "type": "story_type",
+    "url": ("external_links", url_to_external_links),
+}
 
+nested_col_map = {
+    "blocker status": "blocker_state",
+    "blocker": "blocker",
+    "comment": ("comments", parse_comment),
+    "owned by": "owners",
+    "reviewer": "reviewers",
+    "review type": "review_types",
+    "review status": "review_states",
+    "task status": "task_states",
+    "task": "task_titles",
+}
 
-def parse_date_time(d: str):
-    """Parse the string as a datetime, then return as a string in ISO 8601 format."""
-    return datetime.strptime(d, "%b %d, %Y").isoformat()
+def parse_row(row, headers):
+    d = dict()
+    for ix, val in enumerate(row):
+        v = val.strip()
+        if not v:
+            continue
+
+        col = headers[ix]
+        if col in col_map:
+            col_info = col_map[col]
+            if isinstance(col_info, str):
+                d[col_info] = v
+            else:
+                (key, translator) = col_info
+                d[key] = translator(v)
+
+        if col in nested_col_map:
+            col_info = nested_col_map[col]
+            key = None
+            if isinstance(col_info, str):
+                key = col_info
+            else:
+                (key, translator) = col_info
+                v = translator(v)
+            d.setdefault(key, []).append(v)
+    return d
 
 
 ### Utility functions

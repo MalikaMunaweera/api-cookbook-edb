@@ -86,53 +86,6 @@ def sc_creator(items):
     return items
 
 
-def url_to_external_links(url):
-    return [url]
-
-
-def parse_labels(labels: str):
-    return [{"name": label} for label in re.split(r"\s*,\s*", labels)]
-
-
-def parse_priority(priority):
-    lowered = priority.lower()
-    if lowered == "none":
-        return None
-    else:
-        return lowered
-
-
-col_map = {
-    "accepted at": ("accepted_at", parse_date_time),
-    "created at": ("created_at", parse_date_time),
-    "current state": "pt_state",
-    "deadline": ("deadline", parse_date_time),
-    "description": "description",
-    "estimate": ("estimate", int),
-    "id": "external_id",
-    "iteration": "pt_iteration_id",
-    "iteration end": ("pt_iteration_end_date", parse_date),
-    "iteration start": ("pt_iteration_start_date", parse_date),
-    "labels": ("labels", parse_labels),
-    "priority": ("priority", parse_priority),
-    "requested by": "requester",
-    "title": "name",
-    "type": "story_type",
-    "url": ("external_links", url_to_external_links),
-}
-
-nested_col_map = {
-    "blocker status": "blocker_state",
-    "blocker": "blocker",
-    "comment": ("comments", parse_comment),
-    "owned by": "owners",
-    "reviewer": "reviewers",
-    "review type": "review_types",
-    "review status": "review_states",
-    "task status": "task_states",
-    "task": "task_titles",
-}
-
 # These are the keys that are currently correctly populated in the
 # build_entity map. They can be passed to the SC api unchanged. This
 # list is effectively an allow list of top level attributes.
@@ -177,34 +130,6 @@ The following table describes the state of their reviews when they were imported
 
 def escape_md_table_syntax(s):
     return s.replace("|", "\\|")
-
-
-def parse_row(row, headers):
-    d = dict()
-    for ix, val in enumerate(row):
-        v = val.strip()
-        if not v:
-            continue
-
-        col = headers[ix]
-        if col in col_map:
-            col_info = col_map[col]
-            if isinstance(col_info, str):
-                d[col_info] = v
-            else:
-                (key, translator) = col_info
-                d[key] = translator(v)
-
-        if col in nested_col_map:
-            col_info = nested_col_map[col]
-            key = None
-            if isinstance(col_info, str):
-                key = col_info
-            else:
-                (key, translator) = col_info
-                v = translator(v)
-            d.setdefault(key, []).append(v)
-    return d
 
 
 def build_run_label_entity():
@@ -637,38 +562,22 @@ class EntityCollector:
 
 
 def add_attached_files_in_comments(row_info):
-    # Establish connection to the SQLite database
-    conn = sqlite3.connect("pivotal_dump.db")
-    cursor = conn.cursor()
+    try:
+        # Establish connection to the SQLite database
+        conn = sqlite3.connect("pivotal_dump.db")
+        cursor = conn.cursor()
 
-    if "external_id" in row_info and "comments" in row_info:
-        external_id = row_info["external_id"]
+        if "external_id" in row_info and "comments" in row_info:
+            external_id = row_info["external_id"]
 
-        # Query the database for the number of comments
-        cursor.execute("""
-            SELECT COUNT(*)
-            FROM comment
-            WHERE story_id = ?
-        """, (external_id,))
-
-        db_comment_count = cursor.fetchone()[0]
-        csv_comment_count = len(row_info["comments"])
-
-        # Print message based on count comparison
-        if db_comment_count != csv_comment_count:
-            print_with_timestamp(f"Comment count mismatch for story_id {external_id}: "
-                  f"DB count = {db_comment_count}, CSV count = {csv_comment_count}")
-        else:
-            print_with_timestamp(f"Comment count matches for story_id {external_id}")
-
-            # If counts match, fetch detailed comment information
+            # Fetch detailed comment information
             cursor.execute("""
-                SELECT C.id, C.text, C.created_at, FA.filename, FA.content_type
+                SELECT C.id, C.text, FA.filename, FA.content_type
                 FROM comment AS C
                 LEFT JOIN file_attachment AS FA
                 ON C.id = FA.comment_id
                 WHERE C.story_id = ?
-                ORDER BY C.created_at, FA.filename
+                ORDER BY C.id, FA.filename
             """, (external_id,))
 
             db_comments = cursor.fetchall()
@@ -680,26 +589,29 @@ def add_attached_files_in_comments(row_info):
                 if comment_id not in processed_comments:
                     processed_comments[comment_id] = {
                         'id': comment_id,
-                        'text': comment[1] if comment[1] is not None else "",  # Handle None case
-                        'created_at': comment[2],
+                        'text': comment[1] or "",  # Use empty string if text is None
                         'attachments': []
                     }
-                if comment[3]:  # If there's a filename
+                if comment[2]:  # If there's a filename
                     processed_comments[comment_id]['attachments'].append({
-                        'filename': comment[3],
-                        'content_type': comment[4]
+                        'filename': comment[2],
+                        'content_type': comment[3]
                     })
 
             row_info['db_comments'] = list(processed_comments.values())
 
             # Update the original comments in row_info with the processed ones
             for i, comment in enumerate(row_info['comments']):
-                if i < len(row_info['db_comments']):
-                    comment['text'] = row_info['db_comments'][i]['text']
-                    comment['attachments'] = row_info['db_comments'][i]['attachments']
+                comment['text'] = row_info['db_comments'][i]['text']
+                comment['attachments'] = row_info['db_comments'][i]['attachments']
 
-    # Close the database connection
-    conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred while processing comments for story {row_info.get('external_id', 'unknown')}: {e}")
+
+    finally:
+        # Close the database connection
+        if conn:
+            conn.close()
 
     return row_info
 
