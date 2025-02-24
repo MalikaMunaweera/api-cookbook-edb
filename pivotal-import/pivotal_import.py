@@ -635,7 +635,7 @@ def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
 
 
 def write_created_entities_csv(created_entities):
-    with open(shortcut_imported_entities_csv, "w") as f:
+    with open(shortcut_imported_entities_csv, "w", newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(
             f, ["id", "type", "name", "epic_id", "iteration_id", "url"]
         )
