@@ -320,7 +320,8 @@ def populate_users_csv(users_csv_file, pt_csv_file):
     period, or (b) reach out to support@shortcut.com to request assistance so you're not
     billed for extraneous users.
     """
-    sc_users = fetch_members()
+    sc_users = [user for user in fetch_members() if user.get('state') != 'disabled']
+
     user_matching_map = _build_user_matching_map(sc_users)
     try:
         with open(users_csv_file, "x") as f:
