@@ -593,9 +593,6 @@ def remove_emojis(text):
     # Remove the matched characters
     cleaned_text = pattern.sub('', text)
 
-    # Remove any resulting double spaces
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-
     return cleaned_text
 
 
