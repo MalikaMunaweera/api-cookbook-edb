@@ -15,6 +15,9 @@ import: initialize
 import-apply: initialize
 	pipenv run python pivotal_import.py --apply
 
+init:
+	pipenv run python initialize.py
+
 initialize: setup
 	pipenv run python initialize.py
 

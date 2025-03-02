@@ -4,9 +4,10 @@
 # See README.md for prerequisites, setup, and usage.
 import argparse
 import csv
-import re
-import sys
+import logging
+import os
 import sqlite3
+import sys
 from datetime import datetime
 from collections import Counter
 
@@ -35,55 +36,78 @@ PIVOTAL_RELEASE_TYPE_LABEL = "pivotal-release"
 """The label indicating a story had reviews in Pivotal."""
 PIVOTAL_HAD_REVIEW_LABEL = "pivotal-had-review"
 
-def sc_creator(items):
-    """Create Shortcut entities utilizing bulk APIs whenever possible.
 
-    Accepts a list of dicts that must have at least two keys `type`
-    and `entity`. `type` must be one of:
-    - epic
-    - iteration
-    - story
-
-    `entity` must be the payload that is sent to the Shortcut API.
-
-    Mutates and returns the list of items with two new keys:
-    - `imported_id`: the id of the entity that was created
-    - `imported_entity`: the full entity that was created
+def write_failed_stories(failed_stories):
     """
-    batch_stories = []
+    Write failed story creation attempts to CSV, appending to existing file.
 
-    def create_stories(stories):
+    Args:
+        failed_stories: List of stories that failed to create
+    """
+    if not failed_stories:
+        return
+
+    filename = "data/failed_stories.csv"
+    fieldnames = ["story_name", "external_id", "error_message", "story_payload", "timestamp"]
+    file_exists = os.path.exists(filename)
+
+    try:
+        with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            # Write header only if file is new
+            if not file_exists:
+                writer.writeheader()
+
+            # Add timestamp to each row
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for story in failed_stories:
+                writer.writerow({
+                    "story_name": story["entity"].get("name", "Unknown"),
+                    "external_id": story["entity"].get("external_id", "Unknown"),
+                    "error_message": story.get("error_message", "Unknown error"),
+                    "story_payload": json.dumps(story["entity"]),
+                    "timestamp": current_time
+                })
+
+        print_with_timestamp(f"Added {len(failed_stories)} failed stories to {filename}")
+
+    except IOError as e:
+        printerr(f"Error writing to {filename}: {str(e)}")
+
+
+def create_stories(stories):
+    failed_stories = []
+    successful_stories = []
+
+    try:
         entities = [s["entity"] for s in stories]
         created_entities = sc_post("/stories/bulk", {"stories": entities})
+
+        # Match created entities with original stories
         for created, story in zip(created_entities, stories):
             story["imported_entity"] = created
-        return stories
+            successful_stories.append(story)
 
-    for item in items:
-        if item["type"] == "story":
-            batch_stories.append(item)
-        elif item["type"] == "epic":
-            res = sc_post("/epics", item["entity"])
-            item["imported_entity"] = res
-        elif item["type"] == "iteration":
-            res = sc_post("/iterations", item["entity"])
-            item["imported_entity"] = res
-        elif item["type"] == "label":
-            res = sc_post("/labels", item["entity"])
-            item["imported_entity"] = res
-        else:
-            raise RuntimeError("Unknown entity type {}".format(item["type"]))
+    except Exception as e:
+        # If bulk creation fails, try creating stories one by one
+        print_with_timestamp("Bulk creation failed. Attempting individual story creation...")
 
-        if len(batch_stories) >= BATCH_SIZE:
-            print_with_timestamp("Creating Stories in Batches of {}".format(BATCH_SIZE))
-            create_stories(batch_stories)
-            batch_stories.clear()
+        for story in stories:
+            try:
+                created = sc_post("/stories", story["entity"])
+                story["imported_entity"] = created
+                successful_stories.append(story)
+            except Exception as story_error:
+                story["error_message"] = str(story_error)
+                failed_stories.append(story)
+                print_with_timestamp(f"Failed to create story {story['entity'].get('name', 'Unknown')}: {story_error}")
 
-    if batch_stories:
-        print_with_timestamp("Creating Stories in Batches of {}".format(BATCH_SIZE))
-        create_stories(batch_stories)
+    # Write failed stories to CSV
+    if failed_stories:
+        write_failed_stories(failed_stories)
 
-    return items
+    return successful_stories
 
 
 # These are the keys that are currently correctly populated in the
@@ -336,7 +360,7 @@ def get_mock_emitter():
             created_entity["app_url"] = f"https://example.com/entity/{entity_id}"
             item["imported_entity"] = created_entity
             print_with_timestamp(
-                'Creating {} {} "{}"'.format(
+                '[DRY RUN] Creating {} {} "{}"'.format(
                     item["type"], entity_id, item["entity"]["name"]
                 )
             )
@@ -402,28 +426,23 @@ def assign_stories_to_iterations(stories, iterations):
 
 
 class EntityCollector:
-    """Collect and process entities for import into Shortcut.
+    """
+    Manages the collection and processing of entities for Shortcut import.
 
-    The emitter is a function that takes a list of entities and
-    performs the actions needed to create those entities in
-    Shortcut. Must return a list of ids that represent the created
-    entities.
+    Handles stories, epics, iterations, and labels while maintaining proper
+    relationships between entities. Processes files and manages batch operations.
     """
 
-    def __init__(self, emitter=None):
-        _mock_global_id = 0
+    def __init__(self, emitter, is_dry_run):
         self.stories = []
         self.epics = []
         self.files = []
-        # set of strings in {id}|{start}|{end} format
-        # because dicts aren't hashable in Python
         self.iteration_strings = set()
-        # to be populated at commit()
         self.iterations = []
         self.labels = []
-        if emitter is None:
-            emitter = get_mock_emitter()
         self.emitter = emitter
+        self.is_dry_run = is_dry_run
+        print_with_timestamp(f"EntityCollector initialized with is_dry_run={is_dry_run}")
 
     def collect(self, item):
         if item["type"] == "story":
@@ -439,14 +458,33 @@ class EntityCollector:
 
         return {item["type"]: 1}
 
-    def link_entities(self):
-        # find all epics and their associated label
-        # find all stories
-        pass
+    def process_story_batch(self, batch):
+        """Process a batch of stories including their file attachments."""
+        # First process all files for this batch
+        processed_stories = process_files_for_stories(batch, self.is_dry_run)
+
+        # Then create the stories using bulk API
+        try:
+            created_stories = self.emitter(processed_stories)
+            print_with_timestamp(f"{'[DRY RUN] ' if self.is_dry_run else ''}Successfully created batch of {len(created_stories)} stories")
+            return created_stories
+        except Exception as e:
+            print_with_timestamp(f"{'[DRY RUN] ' if self.is_dry_run else ''}Batch creation failed: {str(e)}")
+            write_failed_stories(processed_stories)
+            return []
 
     def commit(self):
-        # create all the default labels
+        created_entities = []
+        written_entities = set()  # Track what we've written to CSV
+
+        # Create all the default labels
+        print_with_timestamp("Processing labels...")
         self.labels = self.emitter(self.labels)
+        if not self.is_dry_run:
+            label_entities = [label["imported_entity"] for label in self.labels]
+            write_to_imported_entities_csv(label_entities, mode='w')  # Initialize file with labels
+            written_entities.update(('label', entity['id']) for entity in label_entities)
+        created_entities.extend(label["imported_entity"] for label in self.labels)
         for label in self.labels:
             if PIVOTAL_TO_SHORTCUT_RUN_LABEL == label["entity"]["name"]:
                 label_url = label["imported_entity"]["app_url"]
@@ -454,12 +492,20 @@ class EntityCollector:
                     f"Import Started\n\n==> Click here to monitor import progress: {label_url}"
                 )
 
-        # create all the epics and find their associated Shortcut epic ids
+        # Create all the epics
+        print_with_timestamp("Processing epics...")
         self.epics = self.emitter(self.epics)
-        print_with_timestamp("Finished creating {} epics".format(len(self.epics)))
-        assign_stories_to_epics(self.stories, self.epics)
+        if not self.is_dry_run:
+            epic_entities = [epic["imported_entity"] for epic in self.epics]
+            new_epics = [entity for entity in epic_entities
+                         if ('epic', entity['id']) not in written_entities]
+            if new_epics:
+                write_to_imported_entities_csv(new_epics)  # Append epics
+                written_entities.update(('epic', entity['id']) for entity in new_epics)
+        created_entities.extend(epic["imported_entity"] for epic in self.epics)
+        print_with_timestamp(f"Finished creating {len(self.epics)} epics")
 
-        # create all iterations and find their associated Shortcut iteration ids
+        # Create all iterations
         iteration_entities = []
         for iteration_string in self.iteration_strings:
             id, start_date, end_date = iteration_string.split("|")
@@ -476,88 +522,48 @@ class EntityCollector:
                 }
             )
         self.iterations = self.emitter(iteration_entities)
-        print_with_timestamp("Finished creating {} iterations".format(len(self.iterations)))
-        assign_stories_to_iterations(self.stories, self.iterations)
+        if not self.is_dry_run:
+            iteration_entities = [iteration["imported_entity"] for iteration in self.iterations]
+            new_iterations = [entity for entity in iteration_entities
+                             if ('iteration', entity['id']) not in written_entities]
+            if new_iterations:
+                write_to_imported_entities_csv(new_iterations)
+                written_entities.update(('iteration', entity['id']) for entity in new_iterations)
+        created_entities.extend(iteration["imported_entity"] for iteration in self.iterations)
+        print_with_timestamp(f"Finished creating {len(self.iterations)} iterations")
 
-        # Upload files attached to comments in stories
-        for story in self.stories:
-            pt_id = story["entity"]["external_id"]
-            pt_files_dir = f"data/{pt_id}"
-            if os.path.isdir(pt_files_dir):
-                print_with_timestamp(f"Processing files for story {pt_id}...")
+        # Process stories in batches
+        successful_stories = []
+        for i in range(0, len(self.stories), BATCH_SIZE):
+            batch = self.stories[i:i + BATCH_SIZE]
+            print_with_timestamp(f"Processing batch {i//BATCH_SIZE + 1} of {(len(self.stories)-1)//BATCH_SIZE + 1}")
 
-                # Get all files in the story directory
-                all_story_files = {
-                    f: os.path.join(dirpath, f)
-                    for (dirpath, _, filenames) in os.walk(pt_files_dir)
-                    for f in filenames
-                }
+            # Link epics and iterations before processing
+            assign_stories_to_epics(batch, self.epics)
+            assign_stories_to_iterations(batch, self.iterations)
 
-                # Iterate through comments in the story
-                for i, comment in enumerate(story["entity"].get("comments", [])):
-                    comment_attachments = comment.pop("attachments", [])  # Remove and get attachments
+            # Process the batch
+            created_batch = self.process_story_batch(batch)
+            successful_stories.extend(created_batch)
 
-                    if comment_attachments:
-                        print_with_timestamp(f"Uploading files for comment {i} in story {pt_id}...")
+            # If not in dry run, Write successful stories to CSV immediately
+            if not self.is_dry_run:
+                new_stories = []
+                for story in created_batch:
+                    entity = story["imported_entity"]
+                    if ('story', entity['id']) not in written_entities:
+                        new_stories.append(entity)
+                        written_entities.add(('story', entity['id']))
 
-                        # Find the full paths of files mentioned in the comment
-                        comment_file_paths = [
-                            all_story_files[attachment['filename']]
-                            for attachment in comment_attachments
-                            if attachment['filename'] in all_story_files
-                        ]
+                if new_stories:
+                    print_with_timestamp(f"Writing batch of {len(new_stories)} stories to CSV")
+                    write_to_imported_entities_csv(new_stories, mode='a')
+                    created_entities.extend(new_stories)
+            else:
+                # In dry run, just add to created_entities without writing to CSV
+                created_entities.extend(story["imported_entity"] for story in created_batch)
 
-                        if comment_file_paths:
-                            file_entities = sc_upload_files(comment_file_paths)
-                            self.files += [
-                                {"imported_entity": file_entity} for file_entity in file_entities
-                            ]
-
-                            # Create file attachment strings and append to comment text
-                            file_attachment_strings = []
-                            for file_entity, attachment in zip(file_entities, comment_attachments):
-                                filename = file_entity["filename"]
-                                url = file_entity["url"]
-                                content_type = attachment['content_type']
-
-                                # Check if the content type is an image
-                                is_image = content_type.startswith('image/')
-
-                                # Create attachment string based on content type
-                                attachment_string = f"{'!' if is_image else ''}[{filename}]({url})"
-                                file_attachment_strings.append(attachment_string)
-
-                            # Append file attachment strings to comment text
-                            if file_attachment_strings:
-                                comment["text"] += "\n\n" + "\n".join(file_attachment_strings) + "\n"
-
-                    # Update the comment in the story entity
-                    story["entity"]["comments"][i] = comment
-
-
-        def clean_story(story):
-            if "comments" in story["entity"]:
-                for comment in story["entity"]["comments"]:
-                    comment.pop("attachments", None)
-            return story
-
-        # Clean all stories
-        self.stories = [clean_story(story) for story in self.stories]
-
-
-        # create all the stories
-        self.stories = self.emitter(self.stories)
-        print_with_timestamp("Finished creating {} stories".format(len(self.stories)))
-
-        # Aggregate all the created stories, epics, iterations, and labels into a list of maps
-        created_entities = []
-        created_set = set()
-        for item in self.epics + self.iterations + self.files + self.stories:
-            entity = item["imported_entity"]
-            if entity["id"] not in created_set:
-                created_entities.append(entity)
-                created_set.add(entity["id"])
-
+        print_with_timestamp(f"Finished creating {len(successful_stories)} stories")
         return created_entities
 
 
@@ -634,28 +640,6 @@ def process_pt_csv_export(ctx, pt_csv_file, entity_collector):
     print_stats(stats)
 
 
-def write_created_entities_csv(created_entities):
-    with open(shortcut_imported_entities_csv, "w", newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(
-            f, ["id", "type", "name", "epic_id", "iteration_id", "url"]
-        )
-        writer.writeheader()
-        for entity in created_entities:
-            print_with_timestamp("Writing Entity {}".format(entity["name"]))
-            writer.writerow(
-                {
-                    "id": entity["id"],
-                    "type": entity["entity_type"],
-                    "name": entity["name"],
-                    "epic_id": entity["epic_id"] if "epic_id" in entity else None,
-                    "iteration_id": (
-                        entity["iteration_id"] if "iteration_id" in entity else None
-                    ),
-                    "url": entity["app_url"] if "app_url" in entity else entity["url"],
-                }
-            )
-
-
 def build_ctx(cfg):
     ctx = {
         "group_id": cfg["group_id"],
@@ -668,17 +652,260 @@ def build_ctx(cfg):
     return ctx
 
 
+def process_files_for_stories(stories_batch, is_dry_run=False):
+    """
+    Process file attachments for a batch of stories.
+
+    Args:
+        stories_batch: List of story entities to process
+        is_dry_run: Boolean indicating whether to actually upload files
+
+    Returns:
+        List of stories that were successfully processed (all files uploaded)
+    """
+    successful_stories = []
+    failed_stories = []
+    all_failed_files = []
+
+    for story in stories_batch:
+        pt_id = story["entity"]["external_id"]
+        pt_files_dir = f"data/{pt_id}"
+        story_failed = False
+
+        if not os.path.isdir(pt_files_dir):
+            successful_stories.append(story)
+            continue
+
+        print_with_timestamp(f"{'[DRY RUN] ' if is_dry_run else ''}Processing files for story {pt_id}...")
+
+        # Get all files in the story directory
+        all_story_files = {
+            f: os.path.join(dirpath, f)
+            for (dirpath, _, filenames) in os.walk(pt_files_dir)
+            for f in filenames
+        }
+
+        # Process each comment's attachments
+        for i, comment in enumerate(story["entity"].get("comments", [])):
+            comment_attachments = comment.pop("attachments", [])
+
+            if not comment_attachments:
+                continue
+
+            print_with_timestamp(f"{'[DRY RUN] ' if is_dry_run else ''}Uploading {len(comment_attachments)} files for comment {i} in story {pt_id}")
+
+            # Find the full paths of files mentioned in the comment
+            comment_file_paths = [
+                all_story_files[attachment['filename']]
+                for attachment in comment_attachments
+                if attachment['filename'] in all_story_files
+            ]
+
+            if comment_file_paths:
+                if is_dry_run:
+                    successful_files = [{
+                        "filename": os.path.basename(path),
+                        "url": f"https://mock-url/{os.path.basename(path)}",
+                    } for path in comment_file_paths]
+                    failed_files = []
+                else:
+                    successful_files, failed_files = sc_upload_files(comment_file_paths)
+                    # Write successful files to CSV immediately after upload
+                    if successful_files:
+                        write_to_imported_entities_csv(successful_files)
+
+                # If any files failed to upload, mark the story as failed
+                if failed_files:
+                    story_failed = True
+                    for failed in failed_files:
+                        failed["story_id"] = pt_id
+                    all_failed_files.extend(failed_files)
+                    story["error_message"] = f"Failed to upload files: {', '.join(f['filename'] for f in failed_files)}"
+                    break  # Stop processing remaining files for this story
+
+                # Create file attachment strings and append to comment text
+                file_attachment_strings = []
+                for file_entity, attachment in zip(successful_files, comment_attachments):
+                    filename = file_entity["filename"]
+                    url = file_entity["url"]
+                    content_type = attachment['content_type']
+                    is_image = content_type.startswith('image/')
+                    attachment_string = f"{'!' if is_image else ''}[{filename}]({url})"
+                    file_attachment_strings.append(attachment_string)
+
+                # Append file attachment strings to comment text
+                if file_attachment_strings:
+                    comment["text"] += "\n\n" + "\n".join(file_attachment_strings) + "\n"
+
+            # Update the comment in the story entity
+            story["entity"]["comments"][i] = comment
+
+        # Add story to appropriate list based on success/failure
+        if story_failed:
+            failed_stories.append(story)
+        else:
+            successful_stories.append(story)
+
+    # Write failed results to CSV files
+    if not is_dry_run:
+        if all_failed_files:
+            write_failed_files_csv(all_failed_files)
+        if failed_stories:
+            write_failed_stories(failed_stories)
+
+    return successful_stories
+
+
+def write_to_imported_entities_csv(entities, mode='a'):
+    """Write created entities to CSV file for future deletion."""
+    if not entities:
+        return
+
+    try:
+        with open(shortcut_imported_entities_csv, mode, newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, ["type", "id"])
+            if mode == 'w':
+                writer.writeheader()
+
+            for entity in entities:
+                row = {
+                    "type": entity["entity_type"],
+                    "id": str(entity["id"])
+                }
+                writer.writerow(row)
+                print_with_timestamp(f"Wrote {row['type']} {row['id']} to shortcut_imported_entities CSV")
+
+    except Exception as e:
+        printerr(f"Error writing to CSV: {str(e)}")
+
+
+def write_failed_files_csv(failed_files):
+    """Write failed file uploads to CSV, appending to existing file."""
+    if not failed_files:
+        return
+
+    filename = "data/failed_files.csv"
+    file_exists = os.path.exists(filename)
+
+    try:
+        with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, ["story_id", "filename", "error", "timestamp"])
+
+            # Write header only if file is new
+            if not file_exists:
+                writer.writeheader()
+
+            # Add timestamp to each row
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for failed_file in failed_files:
+                failed_file["timestamp"] = current_time
+                writer.writerow(failed_file)
+
+        print_with_timestamp(f"Added {len(failed_files)} failed file entries to {filename}")
+
+    except IOError as e:
+        printerr(f"Error writing to {filename}: {str(e)}")
+
+
+def clean_story(story):
+    if "comments" in story["entity"]:
+        for comment in story["entity"]["comments"]:
+            comment.pop("attachments", None)
+    return story
+
+
+def sc_creator(items):
+    """
+    Creates entities in Shortcut via API calls.
+
+    Processes different entity types (stories, epics, iterations, labels)
+    and handles file attachments. Uses batch processing for stories to
+    optimize API usage.
+    """
+    batch_stories = []
+    all_successful_items = []
+
+    # Initialize CSV file
+    write_to_imported_entities_csv([], mode='w')
+
+    def process_batch():
+        if not batch_stories:
+            return
+
+        print_with_timestamp(f"Processing batch of {len(batch_stories)} stories")
+
+        # First process all files for this batch
+        processed_stories = process_files_for_stories(batch_stories)
+
+        # Clean all stories to remove 'attachments' property from comments
+        processed_stories = [clean_story(story) for story in processed_stories]
+
+        # Then create the stories using bulk API
+        try:
+            entities = [s["entity"] for s in processed_stories]
+            created_entities = sc_post("/stories/bulk", {"stories": entities})
+
+            # Update stories with created entities
+            for created, story in zip(created_entities, processed_stories):
+                story["imported_entity"] = created
+                all_successful_items.append(story)
+
+            # Write successful stories to CSV
+            write_to_imported_entities_csv(created_entities)
+
+        except Exception as e:
+            print_with_timestamp(f"Batch creation failed: {str(e)}")
+            write_failed_stories(processed_stories)
+
+    # Process non-story items first
+    for item in items:
+        if item["type"] != "story":
+            try:
+                if item["type"] == "epic":
+                    res = sc_post("/epics", item["entity"])
+                elif item["type"] == "iteration":
+                    res = sc_post("/iterations", item["entity"])
+                elif item["type"] == "label":
+                    res = sc_post("/labels", item["entity"])
+                else:
+                    raise RuntimeError(f"Unknown entity type {item['type']}")
+
+                item["imported_entity"] = res
+                all_successful_items.append(item)
+                write_to_imported_entities_csv([res])
+            except Exception as e:
+                print_with_timestamp(f"Failed to create {item['type']}: {str(e)}")
+                write_failed_stories([item], f"failed_{item['type']}s.csv")
+
+    # Process stories in batches
+    for item in items:
+        if item["type"] == "story":
+            batch_stories.append(item)
+
+            if len(batch_stories) >= BATCH_SIZE:
+                process_batch()
+                batch_stories.clear()
+
+    # Process remaining stories
+    if batch_stories:
+        process_batch()
+
+    return all_successful_items
+
+
 def main(argv):
     args = parser.parse_args(argv[1:])
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
-    emitter = None
-    if args.apply:
-        emitter = sc_creator
 
-    entity_collector = EntityCollector(emitter)
+    is_dry_run = not args.apply
+    print_with_timestamp(f"Running in {'APPLY' if args.apply else 'DRY RUN'} mode")
 
-    # We need to make API requests before fully validating local config.
+    # Pass is_dry_run directly instead of trying to detect it from emitter
+    emitter = sc_creator if args.apply else get_mock_emitter()
+    entity_collector = EntityCollector(emitter, is_dry_run)
+
+    # Rest of the main function remains the same
     validate_environment()
     cfg = load_config()
     ctx = build_ctx(cfg)
@@ -686,10 +913,7 @@ def main(argv):
     process_pt_csv_export(ctx, cfg["pt_csv_file"], entity_collector)
 
     created_entities = entity_collector.commit()
-    write_created_entities_csv(created_entities)
-
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

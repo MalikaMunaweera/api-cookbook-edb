@@ -120,10 +120,14 @@ def sc_put(path, data={}):
 
 @rate_decorator(rate_mapping)
 def sc_upload_files(files):
-    """Upload and associate `files` with the story with given `story_id`"""
+    """Upload and associate `files` with the story with given `story_id`
+    Returns a tuple of (successful_uploads, failed_uploads)
+    """
     url = f"{api_url_base}/files"
     logger.debug("POST url=%s files=%s headers=%s" % (url, files, headers))
-    file_entities = []
+    successful_uploads = []
+    failed_uploads = []
+
     for file in files:
         try:
             with open(file, "rb") as f:
@@ -142,10 +146,16 @@ def sc_upload_files(files):
                 logger.debug(f"POST response: {resp.status_code} {resp.text}")
                 resp.raise_for_status()
                 resp_json = resp.json()
-                file_entities.append(resp_json[0])
-        except:
-            printerr(f"[Warning] Failed to upload file {file}")
-    return file_entities
+                successful_uploads.append(resp_json[0])
+        except Exception as e:
+            error_message = str(e)
+            printerr(f"[Warning] Failed to upload file {file}: {error_message}")
+            failed_uploads.append({
+                "filename": file,
+                "error": error_message
+            })
+
+    return successful_uploads, failed_uploads
 
 
 @rate_decorator(rate_mapping)
@@ -153,13 +163,42 @@ def sc_delete(path):
     """
     Make a DELETE api call.
 
-    Typically used to delete an entity.
+    Args:
+        path: API endpoint path
+
+    Returns:
+        requests.Response object
+
+    Raises:
+        requests.HTTPError: If the request fails
     """
     url = api_url_base + path
     logger.debug("DELETE url=%s headers=%s" % (url, headers))
-    resp = requests.delete(url, headers=headers)
-    resp.raise_for_status()
-    return resp
+
+    try:
+        resp = requests.delete(url, headers=headers)
+        logger.debug(f"Response status code: {resp.status_code}")
+        logger.debug(f"Response body: {resp.text}")
+
+        # Check if the response indicates success (2xx status code)
+        resp.raise_for_status()
+
+        # Shortcut API typically returns 204 No Content for successful deletions
+        if resp.status_code != 204:
+            logger.warning(f"Unexpected status code {resp.status_code} for successful deletion")
+
+        # Add rate limit logging
+        remaining = resp.headers.get('X-Ratelimit-Remaining')
+        if remaining:
+            logger.debug(f"Rate limit remaining: {remaining}")
+
+        return resp
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Delete request failed: {str(e)}")
+        if hasattr(e.response, 'text'):
+            logger.error(f"Error response: {e.response.text}")
+        raise
 
 
 def printerr(s):
