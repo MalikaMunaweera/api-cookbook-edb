@@ -369,6 +369,22 @@ def get_mock_emitter():
     return mock_emitter
 
 
+def fetch_existing_epics():
+    """Fetch all existing epics from Shortcut"""
+    try:
+        epics = sc_get("/epics")
+        epic_map = {}
+        for epic in epics:
+            for label in epic.get("labels", []):
+                if (label["name"] != PIVOTAL_TO_SHORTCUT_LABEL and
+                    label["name"] != PIVOTAL_TO_SHORTCUT_RUN_LABEL):
+                    epic_map[label["name"]] = epic["id"]
+        return epic_map
+    except Exception as e:
+        print_with_timestamp(f"Error fetching existing epics: {str(e)}")
+        return {}
+
+
 def collect_epic_label_mapping(epics):
     """
     Return a dict mapping label names to Shortcut Epic ID.
@@ -385,20 +401,42 @@ def collect_epic_label_mapping(epics):
     return epic_label_map
 
 
-def assign_stories_to_epics(stories, epics):
+def assign_stories_to_epics(stories, new_epics):
     """
-    Mutate the `stories` to set an epic_id if that story is assigned to that epic.
+    Assign stories to epics, considering both new and existing epics.
     """
-    epic_label_map = collect_epic_label_mapping(epics)
+    # Get mapping from both new and existing epics
+    epic_label_map = collect_epic_label_mapping(new_epics)
+    existing_epic_map = fetch_existing_epics()
+
+    # Merge the maps, giving preference to new epics if there's overlap
+    epic_label_map.update({k: v for k, v in existing_epic_map.items()
+                          if k not in epic_label_map})
+
     for story in stories:
         for label in story["entity"].get("labels", []):
             label_name = label["name"]
             epic_id = epic_label_map.get(label_name)
-            logger.debug(f"story epic id {epic_id}")
             if epic_id is not None:
                 story["entity"]["epic_id"] = epic_id
+                print_with_timestamp(f"Mapped story to epic {epic_id} via label {label_name}")
     return stories
 
+
+def fetch_existing_iterations():
+    """Fetch all existing iterations from Shortcut"""
+    try:
+        iterations = sc_get("/iterations")
+        iteration_map = {}
+        for iteration in iterations:
+            # Assuming iteration names are in format "PT {id}"
+            if iteration["name"].startswith("PT "):
+                pt_id = iteration["name"].split(" ")[1]
+                iteration_map[pt_id] = iteration["id"]
+        return iteration_map
+    except Exception as e:
+        print_with_timestamp(f"Error fetching existing iterations: {str(e)}")
+        return {}
 
 def collect_pt_iteration_mapping(iterations):
     """
@@ -411,17 +449,25 @@ def collect_pt_iteration_mapping(iterations):
         d[str(pt_iteration_id)] = sc_iteration_id
     return d
 
+def assign_stories_to_iterations(stories, new_iterations):
+    """
+    Assign stories to iterations, considering both new and existing iterations.
+    """
+    # Get mapping from both new and existing iterations
+    pt_iteration_mapping = collect_pt_iteration_mapping(new_iterations)
+    existing_iteration_map = fetch_existing_iterations()
 
-def assign_stories_to_iterations(stories, iterations):
-    """
-    Mutate the `stories` to set an iteration_id if that story is assigned to that iteration.
-    """
-    pt_iteration_mapping = collect_pt_iteration_mapping(iterations)
+    # Merge the maps, giving preference to new iterations if there's overlap
+    pt_iteration_mapping.update({k: v for k, v in existing_iteration_map.items()
+                               if k not in pt_iteration_mapping})
+
     for story in stories:
         pt_iteration_id = story["pt_iteration_id"]
         if pt_iteration_id:
-            sc_iteration_id = pt_iteration_mapping[str(pt_iteration_id)]
-            story["entity"]["iteration_id"] = sc_iteration_id
+            sc_iteration_id = pt_iteration_mapping.get(str(pt_iteration_id))
+            if sc_iteration_id:
+                story["entity"]["iteration_id"] = sc_iteration_id
+                print_with_timestamp(f"Mapped story to iteration {sc_iteration_id}")
     return stories
 
 
