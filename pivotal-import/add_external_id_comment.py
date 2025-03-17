@@ -17,11 +17,32 @@ def read_config():
 
 def get_group_stories(group_id):
     """
-    Fetch all stories for a given group ID from Shortcut and create initial CSV
+    Fetch all stories for a given group ID from Shortcut using pagination
     """
+    all_stories = []
+    offset = 0
+    limit = 1000  # Maximum allowed limit per API documentation
+
     try:
-        stories = sc_get(f"/groups/{group_id}/stories")
-        return stories
+        while True:
+            # Fetch stories with pagination parameters
+            stories = sc_get(f"/groups/{group_id}/stories?limit={limit}&offset={offset}")
+
+            if not stories:
+                break
+
+            all_stories.extend(stories)
+
+            if len(stories) < limit:
+                break
+
+            offset += limit
+
+            print_with_timestamp(f"Fetched {len(all_stories)} stories so far...")
+
+        print_with_timestamp(f"Total stories fetched: {len(all_stories)}")
+        return all_stories
+
     except Exception as e:
         print_with_timestamp(f"Error fetching stories: {str(e)}")
         return []
